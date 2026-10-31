@@ -80,6 +80,11 @@ jobs:
           [ -n "$EXPO_PROJECT_ID" ] || echo "::warning::No EXPO_PROJECT_ID variable: this APK has no push notifications."
           npx expo prebuild --platform android --no-install --clean
           rm -f "$RUNNER_TEMP/google-services.json"
+          # A plugin option once dropped CAMERA from the manifest and QR pairing
+          # failed silently on phones. Refuse to ship without what the app needs.
+          for perm in CAMERA INTERNET USE_BIOMETRIC; do
+            grep -q "android.permission.$perm\"/>" android/app/src/main/AndroidManifest.xml               || { echo "::error::AndroidManifest.xml lacks android.permission.$perm"; exit 1; }
+          done
 
       - name: Build and sign the release APK
         working-directory: src/app/android
