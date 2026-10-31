@@ -12,6 +12,10 @@
 #   ANDROID_KEYSTORE_PASS   keystore password
 #   ANDROID_KEY_ALIAS       key alias
 #   ANDROID_KEY_PASS        key password
+#   GOOGLE_SERVICES_JSON_B64  optional: base64 of Firebase's google-services.json (push)
+# Variable (Settings > Variables, not secret):
+#   EXPO_PROJECT_ID         optional: the free Expo project holding the FCM V1 key (push)
+# Without the two optional values the APK builds fine, without notifications.
 #
 # Run: gh workflow run build-android.yml -R atik806/agentdeck-remote-releases -f tag=v0.1.0
 
@@ -63,7 +67,19 @@ jobs:
 
       - name: Generate the native Android project
         working-directory: src/app
-        run: npx expo prebuild --platform android --no-install --clean
+        env:
+          GOOGLE_SERVICES_B64: ${{ secrets.GOOGLE_SERVICES_JSON_B64 }}
+          EXPO_PROJECT_ID: ${{ vars.EXPO_PROJECT_ID }}
+        run: |
+          if [ -n "$GOOGLE_SERVICES_B64" ]; then
+            echo "$GOOGLE_SERVICES_B64" | base64 -d > "$RUNNER_TEMP/google-services.json"
+            export GOOGLE_SERVICES_JSON="$RUNNER_TEMP/google-services.json"
+          else
+            echo "::warning::No GOOGLE_SERVICES_JSON_B64 secret: this APK has no push notifications."
+          fi
+          [ -n "$EXPO_PROJECT_ID" ] || echo "::warning::No EXPO_PROJECT_ID variable: this APK has no push notifications."
+          npx expo prebuild --platform android --no-install --clean
+          rm -f "$RUNNER_TEMP/google-services.json"
 
       - name: Build and sign the release APK
         working-directory: src/app/android
