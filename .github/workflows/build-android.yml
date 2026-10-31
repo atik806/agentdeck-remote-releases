@@ -1,0 +1,109 @@
+# Free Android release build (SYSTEM_PROMPT.md section 0.1).
+#
+# Meant to run in the PUBLIC repo atik806/agentdeck-remote-releases (public repos
+# get unlimited free Actions minutes), the same way AgentDeck desktop's
+# build-mac-linux.yml does. It checks out this source repo at a tag, builds a
+# signed release APK with `expo prebuild` + Gradle (no EAS), and publishes it to
+# a GitHub Release with SHA256SUMS.txt and the signing-certificate fingerprint.
+#
+# Secrets (set them in the releases repo; never commit them):
+#   SOURCE_SSH_KEY          private half of a READ-ONLY deploy key on atik806/agentdeck-remote
+#   ANDROID_KEYSTORE_B64    base64 of the release keystore (see RELEASING.md)
+#   ANDROID_KEYSTORE_PASS   keystore password
+#   ANDROID_KEY_ALIAS       key alias
+#   ANDROID_KEY_PASS        key password
+#
+# Run: gh workflow run build-android.yml -R atik806/agentdeck-remote-releases -f tag=v0.1.0
+
+name: build-android
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Source tag to build, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: write # create the release in THIS repo
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out the source at the tag
+        uses: actions/checkout@v4
+        with:
+          repository: atik806/agentdeck-remote
+          ref: ${{ inputs.tag }}
+          ssh-key: ${{ secrets.SOURCE_SSH_KEY }}
+          path: src
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install
+        working-directory: src
+        run: npm ci
+
+      - name: Test (protocol + app logic)
+        working-directory: src
+        run: |
+          npm test -w protocol
+          npm test -w app
+
+      - name: Generate the native Android project
+        working-directory: src/app
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: Build and sign the release APK
+        working-directory: src/app/android
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+          ./gradlew --no-daemon assembleRelease \
+            -Pandroid.injected.signing.store.file="$RUNNER_TEMP/release.keystore" \
+            -Pandroid.injected.signing.store.password="$KEYSTORE_PASS" \
+            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="$KEY_PASS"
+          rm -f "$RUNNER_TEMP/release.keystore"
+
+      - name: Verify the signature, checksum, fingerprint
+        id: out
+        run: |
+          VERSION="${{ inputs.tag }}"
+          APK="AgentDeck-Remote-${VERSION}.apk"
+          cp src/app/android/app/build/outputs/apk/release/app-release.apk "$APK"
+          APKSIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --print-certs "$APK" | tee certs.txt
+          FINGERPRINT=$(grep -m1 "SHA-256 digest" certs.txt | awk '{print $NF}')
+          sha256sum "$APK" > SHA256SUMS.txt
+          echo "apk=$APK" >> "$GITHUB_OUTPUT"
+          echo "fingerprint=$FINGERPRINT" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > notes.md <<EOF
+          AgentDeck Remote ${{ inputs.tag }} for Android.
+
+          **Install:** download the APK on your phone, open it, and allow "Install unknown apps" for your browser when Android asks. Play Protect may warn because the app isn't from the Play Store.
+
+          **Verify:** \`SHA256SUMS.txt\` lists the APK's checksum. The app is signed with certificate SHA-256 \`${{ steps.out.outputs.fingerprint }}\`; every release uses the same certificate.
+          EOF
+          gh release create "${{ inputs.tag }}" "${{ steps.out.outputs.apk }}" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --title "AgentDeck Remote ${{ inputs.tag }}" --notes-file notes.md
